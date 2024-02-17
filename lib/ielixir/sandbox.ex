@@ -119,7 +119,7 @@ defmodule IElixir.Sandbox do
       {:error, "CompileError", ["** (CompileError) console:1 \"undefined function asdf/0\""], 1}
 
       iex> IElixir.Sandbox.execute_code(%{"code" => "hd []"})
-      {:error, "ArgumentError", ["** (ArgumentError) \"argument error\""], 1}
+      {:error, "ArgumentError", ["** (ArgumentError) \"errors were found at the given arguments:\\n\\n  * 1st argument: not a nonempty list\\n\""], 1}
 
       iex> abc = IElixir.Sandbox.execute_code(%{"code" => "\"a\" + 5"})
       iex> elem(abc, 0)
@@ -170,10 +170,21 @@ defmodule IElixir.Sandbox do
     Logger.debug("Executing request: #{inspect(request)}, count #{state.execution_count}")
 
     try do
-      {{result, binding, env, scope}, stdout, stderr} =
+      {{  {result, binding, env, scope}, diagnostics}, stdout, stderr} =
         CaptureIO.capture do
           {:ok, quoted} = Code.string_to_quoted(request["code"])
-          eval_forms(quoted, state.binding, state.env, state.scope)
+     Code.with_diagnostics([log: true],
+
+   fn -> 
+try do 
+       {:ok,       eval_forms(quoted, state.binding, state.env, state.scope)}
+rescue 
+err -> {:error, err}
+end
+end  ) |> case do 
+{{:ok,r},d} -> {r,d}
+{{:error,e},d} -> throw {:diagnostics, e, d}
+end
         end
 
       binding =
@@ -212,7 +223,8 @@ defmodule IElixir.Sandbox do
 
       Logger.debug("State: #{inspect(new_state)}")
 
-      {:reply, {:ok, maybe_inspect(result), stdout, stderr, state.execution_count}, new_state}
+      mod = Enum.map(diagnostics, & &1.message) |> Enum.join(":")
+      {:reply, {:ok, maybe_inspect(result), stdout, mod <> stderr, state.execution_count}, new_state}
 
       # case result do
       #   :"do not show this result in output" ->
@@ -222,6 +234,9 @@ defmodule IElixir.Sandbox do
       #   _ ->
       #     {:reply, {:ok, inspect(result), output, state.execution_count}, new_state}
       # end
+
+
+    catch {:diagnostics, e, d} -> {:reply, {:error, "DIAGNOSTICS:#{e.__struct__}", ["#{inspect e},#{inspect d}"], state.execution_count}, state}
     rescue
       error in ArgumentError ->
         error_message = "** (#{inspect(error.__struct__)}) #{inspect(error.message)}"
@@ -309,7 +324,12 @@ defmodule IElixir.Sandbox do
   end
 
   defp eval_forms(forms, binding, e) do
+    {ex_vars, erl_vars, erl_binding} = :elixir_erl_var.load_binding(binding,false)
+    e2 = :elixir_env.with_vars(e, ex_vars)
+    ex_s = :elixir_env.env_to_ex(e2)
+    erl_s = :elixir_erl_var.from_env(e2,erl_vars)
+
     :elixir.eval_forms(forms, binding, e)
-    |> Tuple.append(:elixir_env.env_to_scope(e))
+    |> Tuple.append({ex_s,erl_s})
   end
 end
